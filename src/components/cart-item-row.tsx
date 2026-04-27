@@ -18,22 +18,33 @@ export function CartItemRow({
   return (
     <Surface
       style={{
-        borderRadius: 16,
+        backgroundColor: '#ffffff',
+        borderRadius: 22,
         gap: 10,
-        padding: 12,
+        padding: 14,
       }}
       elevation={0}
     >
       <View style={{ alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between' }}>
         <View style={{ flex: 1, gap: 2 }}>
           <Text variant="titleSmall">{item.product.title}</Text>
-          <Text variant="bodySmall">{formatCurrency(item.product.sell_price)}</Text>
+          <Text style={{ opacity: 0.68 }} variant="bodySmall">
+            {formatCurrency(item.product.sell_price)}
+          </Text>
         </View>
         <IconButton icon="trash-can-outline" onPress={onRemove} />
       </View>
 
       <View style={{ alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between' }}>
-        <View style={{ alignItems: 'center', flexDirection: 'row' }}>
+        <View
+          style={{
+            alignItems: 'center',
+            backgroundColor: '#f3f5f7',
+            borderRadius: 999,
+            flexDirection: 'row',
+            paddingHorizontal: 4,
+          }}
+        >
           <IconButton disabled={item.qty <= 1} icon="minus-circle-outline" onPress={onDecrease} />
           <Text variant="titleMedium">{item.qty}</Text>
           <IconButton icon="plus-circle-outline" onPress={onIncrease} />

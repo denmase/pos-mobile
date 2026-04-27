@@ -60,22 +60,36 @@ export async function mobileRequest<T = unknown>(
     url.searchParams.set(key, String(value));
   }
 
-  const response = await fetch(url.toString(), {
-    method: options.method ?? 'GET',
-    headers: {
-      Accept: 'application/json',
-      'Content-Type': 'application/json',
-      ...(options.token ? { Authorization: `Bearer ${options.token}` } : {}),
-    },
-    body: options.body ? JSON.stringify(options.body) : undefined,
-  });
+  let response: Response;
+
+  try {
+    response = await fetch(url.toString(), {
+      method: options.method ?? 'GET',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        ...(options.token ? { Authorization: `Bearer ${options.token}` } : {}),
+      },
+      body: options.body ? JSON.stringify(options.body) : undefined,
+    });
+  } catch {
+    throw new Error('Tidak bisa terhubung ke server API.');
+  }
 
   const text = await response.text();
-  const data = text ? (JSON.parse(text) as Record<string, unknown>) : {};
+  let data: Record<string, unknown> = {};
+
+  if (text) {
+    try {
+      data = JSON.parse(text) as Record<string, unknown>;
+    } catch {
+      data = {};
+    }
+  }
 
   if (!response.ok) {
     throw new ApiError(
-      (typeof data.message === 'string' && data.message) || 'Permintaan gagal.',
+      (typeof data.message === 'string' && data.message) || `Permintaan gagal (HTTP ${response.status}).`,
       response.status,
       (data.errors as Record<string, string[]>) || undefined
     );

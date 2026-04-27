@@ -12,20 +12,40 @@ export function ProductCard({
   onAdd: (productId: number) => void;
 }) {
   return (
-    <Card mode="contained" style={{ flex: 1, maxWidth: '48%' }}>
+    <Card
+      mode="contained"
+      style={{
+        backgroundColor: '#ffffff',
+        borderRadius: 24,
+        flex: 1,
+        maxWidth: '48%',
+        overflow: 'hidden',
+      }}
+    >
       {product.image ? (
         <Image
           source={{ uri: product.image }}
           style={{
-            backgroundColor: '#e9eef3',
-            borderTopLeftRadius: 12,
-            borderTopRightRadius: 12,
-            height: 120,
+            backgroundColor: '#eef2f6',
+            height: 132,
             width: '100%',
           }}
         />
-      ) : null}
-      <Card.Content style={{ gap: 8, paddingTop: 12 }}>
+      ) : (
+        <View
+          style={{
+            alignItems: 'center',
+            backgroundColor: '#eef2f6',
+            height: 132,
+            justifyContent: 'center',
+          }}
+        >
+          <Chip compact icon="image-off-outline">
+            Tanpa gambar
+          </Chip>
+        </View>
+      )}
+      <Card.Content style={{ gap: 10, paddingTop: 14 }}>
         <View style={{ gap: 4 }}>
           <Text numberOfLines={2} variant="titleSmall">
             {product.title}
@@ -34,11 +54,11 @@ export function ProductCard({
             {product.category?.name || 'Tanpa kategori'}
           </Text>
         </View>
-        <Chip compact icon="package-variant-closed">
+        <Chip compact icon="package-variant-closed" style={{ alignSelf: 'flex-start' }}>
           Stok {product.stock}
         </Chip>
         <Text variant="titleMedium">{formatCurrency(product.sell_price)}</Text>
-        <Button mode="contained-tonal" onPress={() => onAdd(product.id)}>
+        <Button mode="contained" onPress={() => onAdd(product.id)}>
           Tambah
         </Button>
       </Card.Content>
