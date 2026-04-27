@@ -138,3 +138,12 @@ export type TransactionDetail = {
   } | null;
   details: CartItem[];
 };
+
+export type TransactionDocumentVariant = 'invoice' | 'receipt-80' | 'receipt-58' | 'shipping';
+
+export type TransactionDocumentPayload = {
+  variant: TransactionDocumentVariant;
+  title: string;
+  filename: string;
+  html: string;
+};

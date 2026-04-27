@@ -1,6 +1,7 @@
 import React from 'react';
 import {
   FlatList,
+  Linking,
   RefreshControl,
   ScrollView,
   StyleSheet,
@@ -31,7 +32,7 @@ import {
   Text,
   TextInput,
 } from 'react-native-paper';
-import { SafeAreaProvider } from 'react-native-safe-area-context';
+import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   ApiError,
   loginRequest,
@@ -54,6 +55,8 @@ import type {
   LoginResponse,
   PaymentGateway,
   Product,
+  TransactionDocumentPayload,
+  TransactionDocumentVariant,
   TransactionDetail,
   TransactionSummary,
   User,
@@ -62,6 +65,7 @@ import { formatCurrency, formatDateTime } from './src/utils/format';
 import { CartItemRow } from './src/components/cart-item-row';
 import { EmptyState } from './src/components/empty-state';
 import { ProductCard } from './src/components/product-card';
+import { printHtmlDocument, shareHtmlDocumentPdf } from './src/lib/receipt';
 
 const DEFAULT_API_BASE_URL = normalizeBaseUrl(
   process.env.EXPO_PUBLIC_API_BASE_URL || 'http://127.0.0.1:8000/api/mobile'
@@ -74,6 +78,36 @@ type AddCustomerForm = {
   no_telp: string;
   address: string;
 };
+
+function getPaymentMethodLabel(method: string): string {
+  switch (method) {
+    case 'cash':
+      return 'Tunai';
+    case 'bank_transfer':
+      return 'Transfer bank';
+    case 'midtrans':
+      return 'Midtrans';
+    case 'xendit':
+      return 'Xendit';
+    case 'pay_later':
+      return 'Pay later';
+    default:
+      return method;
+  }
+}
+
+function getStatusChipIcon(status: string): string {
+  switch (status) {
+    case 'paid':
+      return 'check-decagram';
+    case 'pending':
+      return 'timer-sand';
+    case 'unpaid':
+      return 'clock-alert-outline';
+    default:
+      return 'information-outline';
+  }
+}
 
 export default function App() {
   const [booting, setBooting] = React.useState(true);
@@ -91,8 +125,13 @@ export default function App() {
   const [transactions, setTransactions] = React.useState<TransactionSummary[]>([]);
   const [historySearch, setHistorySearch] = React.useState('');
   const [historyLoading, setHistoryLoading] = React.useState(false);
+  const [authMessage, setAuthMessage] = React.useState('Menyiapkan POS Mobile');
+  const [bootstrapError, setBootstrapError] = React.useState<string | null>(null);
   const [transactionDetail, setTransactionDetail] = React.useState<TransactionDetail | null>(null);
   const [transactionDetailLoading, setTransactionDetailLoading] = React.useState(false);
+  const [documentTransaction, setDocumentTransaction] = React.useState<TransactionDetail | null>(null);
+  const [documentVariant, setDocumentVariant] = React.useState<TransactionDocumentVariant>('receipt-80');
+  const [documentBusy, setDocumentBusy] = React.useState(false);
   const [snackbar, setSnackbar] = React.useState<SnackbarState>({
     visible: false,
     message: '',
@@ -109,6 +148,7 @@ export default function App() {
         token: activeSession.token,
       });
       setBootstrap(data);
+      setBootstrapError(null);
     },
     []
   );
@@ -181,15 +221,16 @@ export default function App() {
 
       setSession(activeSession);
       setApiBaseUrlDraft(stored.baseUrl);
-      await Promise.all([
-        loadBootstrap(activeSession),
-        loadProducts(activeSession, productSearch, selectedCategory),
-        loadTransactions(activeSession, historySearch),
-      ]);
+      setAuthMessage('Memuat data kasir');
+      try {
+        await loadBootstrap(activeSession);
+      } catch (error) {
+        setBootstrapError(error instanceof Error ? error.message : 'Gagal memuat data POS.');
+      }
 
       return draftSession;
     },
-    [historySearch, loadBootstrap, loadProducts, loadTransactions, productSearch, selectedCategory]
+    [loadBootstrap]
   );
 
   React.useEffect(() => {
@@ -233,8 +274,23 @@ export default function App() {
     return () => clearTimeout(timeoutId);
   }, [historySearch, loadTransactions, session]);
 
+  React.useEffect(() => {
+    if (!session || bootstrap) {
+      return;
+    }
+
+    setAuthMessage('Memuat data kasir');
+    setBootstrapError(null);
+
+    void loadBootstrap(session).catch((error) => {
+      setBootstrapError(error instanceof Error ? error.message : 'Gagal memuat data POS.');
+    });
+  }, [bootstrap, loadBootstrap, session]);
+
   const handleLogin = React.useCallback(async () => {
     setSubmittingLogin(true);
+    setAuthMessage('Menghubungkan ke server');
+    setBootstrapError(null);
 
     try {
       const baseUrl = normalizeBaseUrl(apiBaseUrlDraft);
@@ -255,22 +311,17 @@ export default function App() {
         baseUrl: activeSession.baseUrl,
       });
       setSession(activeSession);
-      await Promise.all([
-        loadBootstrap(activeSession),
-        loadProducts(activeSession),
-        loadTransactions(activeSession),
-      ]);
+      setAuthMessage('Memuat data kasir');
       notify(`Selamat datang, ${payload.user.name}.`);
     } catch (error) {
-      const message =
-        error instanceof ApiError
-          ? error.message
-          : 'Login gagal. Periksa URL API, email, dan password.';
+      const message = error instanceof Error ? error.message : 'Login gagal.';
       notify(message);
+      setSession(null);
+      setBootstrap(null);
     } finally {
       setSubmittingLogin(false);
     }
-  }, [apiBaseUrlDraft, email, loadBootstrap, loadProducts, loadTransactions, notify, password]);
+  }, [apiBaseUrlDraft, email, loadBootstrap, notify, password]);
 
   const handleLogout = React.useCallback(async () => {
     if (session) {
@@ -287,6 +338,7 @@ export default function App() {
     await clearStoredSession();
     setSession(null);
     setBootstrap(null);
+    setBootstrapError(null);
     setProducts([]);
     setTransactions([]);
     notify('Session mobile sudah ditutup.');
@@ -345,6 +397,74 @@ export default function App() {
     [notify, session]
   );
 
+  const openDocumentMenu = React.useCallback((transaction: TransactionDetail) => {
+    setDocumentVariant('receipt-80');
+    setDocumentTransaction(transaction);
+  }, []);
+
+  const fetchTransactionDocument = React.useCallback(
+    async (transaction: TransactionDetail, variant: TransactionDocumentVariant) => {
+      if (!session) {
+        throw new Error('Session login tidak ditemukan.');
+      }
+
+      const payload = await mobileRequest<{ document: TransactionDocumentPayload }>(
+        session.baseUrl,
+        `/transactions/${transaction.invoice}/documents/${variant}`,
+        {
+          token: session.token,
+        }
+      );
+
+      return payload.document;
+    },
+    [session]
+  );
+
+  const handlePrintDocument = React.useCallback(
+    async (transaction: TransactionDetail, variant: TransactionDocumentVariant) => {
+      setDocumentBusy(true);
+      try {
+        const document = await fetchTransactionDocument(transaction, variant);
+        await printHtmlDocument(document.html);
+      } catch (error) {
+        notify(error instanceof Error ? error.message : 'Gagal membuka print dialog.');
+      } finally {
+        setDocumentBusy(false);
+      }
+    },
+    [fetchTransactionDocument, notify]
+  );
+
+  const handleShareDocument = React.useCallback(
+    async (transaction: TransactionDetail, variant: TransactionDocumentVariant) => {
+      setDocumentBusy(true);
+      try {
+        const document = await fetchTransactionDocument(transaction, variant);
+        const shared = await shareHtmlDocumentPdf(document.html);
+        if (!shared) {
+          notify('Fitur share PDF belum tersedia di device ini.');
+        }
+      } catch (error) {
+        notify(error instanceof Error ? error.message : 'Gagal membagikan dokumen.');
+      } finally {
+        setDocumentBusy(false);
+      }
+    },
+    [fetchTransactionDocument, notify]
+  );
+
+  const openPaymentUrl = React.useCallback(
+    async (url: string) => {
+      try {
+        await Linking.openURL(url);
+      } catch {
+        notify('Tautan pembayaran tidak bisa dibuka.');
+      }
+    },
+    [notify]
+  );
+
   if (booting) {
     return (
       <SafeAreaProvider>
@@ -352,7 +472,7 @@ export default function App() {
           <View style={styles.centered}>
             <ActivityIndicator animating size="large" />
             <Text variant="titleMedium" style={styles.bootText}>
-              Menyiapkan POS Mobile
+              {authMessage}
             </Text>
           </View>
         </PaperProvider>
@@ -363,7 +483,40 @@ export default function App() {
   return (
     <SafeAreaProvider>
       <PaperProvider theme={appTheme}>
-        {session && bootstrap ? (
+        {session && !bootstrap ? (
+          <View style={styles.centered}>
+            <ActivityIndicator animating size="large" />
+            <Text variant="titleMedium" style={styles.bootText}>
+              {authMessage}
+            </Text>
+            <Text style={styles.mutedText} variant="bodyMedium">
+              Login sudah berhasil. Aplikasi sedang menyiapkan data POS.
+            </Text>
+            {bootstrapError ? (
+              <View style={styles.bootstrapErrorBox}>
+                <Text variant="bodyMedium">{bootstrapError}</Text>
+                <Button
+                  mode="contained"
+                  onPress={() => {
+                    if (!session) {
+                      return;
+                    }
+
+                    setBootstrapError(null);
+                    setAuthMessage('Mencoba lagi memuat data kasir');
+                    void loadBootstrap(session).catch((error) => {
+                      setBootstrapError(
+                        error instanceof Error ? error.message : 'Gagal memuat data POS.'
+                      );
+                    });
+                  }}
+                >
+                  Coba lagi
+                </Button>
+              </View>
+            ) : null}
+          </View>
+        ) : session && bootstrap ? (
           <AuthenticatedApp
             bootstrap={bootstrap}
             initializing={initializing}
@@ -388,6 +541,7 @@ export default function App() {
             refreshingDashboard={refreshingDashboard}
             setApiBaseUrlDraft={setApiBaseUrlDraft}
             apiBaseUrlDraft={apiBaseUrlDraft}
+            onOpenDocumentMenu={openDocumentMenu}
           />
         ) : (
           <SignInScreen
@@ -424,10 +578,10 @@ export default function App() {
                     {transactionDetail.customer?.name || 'Pelanggan umum'}
                   </Text>
                   <View style={styles.detailMetaRow}>
-                    <Chip compact icon="credit-card-outline">
-                      {transactionDetail.payment_method}
+                    <Chip compact icon="credit-card-outline" style={styles.neutralChip}>
+                      {getPaymentMethodLabel(transactionDetail.payment_method)}
                     </Chip>
-                    <Chip compact icon="check-decagram-outline">
+                    <Chip compact icon={getStatusChipIcon(transactionDetail.payment_status)} style={styles.neutralChip}>
                       {transactionDetail.payment_status}
                     </Chip>
                   </View>
@@ -449,16 +603,67 @@ export default function App() {
                       <Text variant="titleMedium">{formatCurrency(transactionDetail.grand_total)}</Text>
                     )}
                   />
-                  {!!transactionDetail.payment_url && (
-                    <HelperText type="info" visible>
-                      Payment link: {transactionDetail.payment_url}
-                    </HelperText>
-                  )}
                 </ScrollView>
               ) : null}
             </Dialog.Content>
             <Dialog.Actions>
+              {!!transactionDetail?.payment_url && (
+                <Button onPress={() => void openPaymentUrl(transactionDetail.payment_url || '')}>
+                  Payment link
+                </Button>
+              )}
+              {transactionDetail && (
+                <Button onPress={() => openDocumentMenu(transactionDetail)}>Dokumen</Button>
+              )}
               <Button onPress={() => setTransactionDetail(null)}>Tutup</Button>
+            </Dialog.Actions>
+          </Dialog>
+
+          <Dialog
+            dismissable={!documentBusy}
+            onDismiss={() => setDocumentTransaction(null)}
+            visible={Boolean(documentTransaction)}
+          >
+            <Dialog.Title>Dokumen transaksi</Dialog.Title>
+            <Dialog.Content>
+              {documentTransaction ? (
+                <View style={styles.cardContentGap}>
+                  <Text variant="titleMedium">{documentTransaction.invoice}</Text>
+                  <Text style={styles.mutedText} variant="bodyMedium">
+                    Pilih format dokumen yang sama seperti di versi web.
+                  </Text>
+                  <SegmentedButtons
+                    buttons={[
+                      { value: 'invoice', label: 'Invoice' },
+                      { value: 'receipt-80', label: 'Struk 80' },
+                      { value: 'receipt-58', label: 'Struk 58' },
+                      { value: 'shipping', label: 'Resi' },
+                    ]}
+                    onValueChange={(value) => setDocumentVariant(value as TransactionDocumentVariant)}
+                    value={documentVariant}
+                  />
+                </View>
+              ) : null}
+            </Dialog.Content>
+            <Dialog.Actions>
+              {documentTransaction ? (
+                <View style={styles.inlineRow}>
+                  <Button
+                    disabled={documentBusy}
+                    onPress={() => void handleShareDocument(documentTransaction, documentVariant)}
+                  >
+                    Share PDF
+                  </Button>
+                  <Button
+                    disabled={documentBusy}
+                    loading={documentBusy}
+                    onPress={() => void handlePrintDocument(documentTransaction, documentVariant)}
+                  >
+                    Print
+                  </Button>
+                </View>
+              ) : null}
+              <Button onPress={() => setDocumentTransaction(null)}>Tutup</Button>
             </Dialog.Actions>
           </Dialog>
         </Portal>
@@ -501,11 +706,20 @@ function SignInScreen({
       contentContainerStyle={styles.authContainer}
       keyboardShouldPersistTaps="handled"
     >
+      <Surface mode="flat" style={styles.authHero}>
+        <Avatar.Icon icon="shopping-outline" size={58} style={styles.authAvatar} />
+        <Text style={styles.authHeroText} variant="headlineSmall">
+          POS Mobile
+        </Text>
+        <Text style={styles.authHeroText} variant="bodyMedium">
+          Retail cashier app dengan alur checkout cepat, hold cart, dan receipt yang siap dicetak.
+        </Text>
+      </Surface>
       <Surface style={styles.authCard} elevation={1}>
         <Avatar.Icon icon="storefront-outline" size={64} style={styles.authAvatar} />
-        <Text variant="headlineSmall">POS Mobile</Text>
+        <Text variant="headlineSmall">Masuk ke kasir</Text>
         <Text style={styles.mutedText} variant="bodyMedium">
-          Cashier app berbasis React Native Paper untuk backend Laravel POS.
+          Hubungkan aplikasi ke backend Laravel POS dan lanjutkan transaksi dari device mana saja.
         </Text>
 
         <TextInput
@@ -567,6 +781,7 @@ type AuthenticatedAppProps = {
   onShowMessage: (message: string) => void;
   onTransactionPress: (invoice: string) => void;
   setApiBaseUrlDraft: (value: string) => void;
+  onOpenDocumentMenu: (transaction: TransactionDetail) => void;
 };
 
 function AuthenticatedApp({
@@ -592,6 +807,7 @@ function AuthenticatedApp({
   setProductSearch,
   setSelectedCategory,
   transactions,
+  onOpenDocumentMenu,
 }: AuthenticatedAppProps) {
   const [tabIndex, setTabIndex] = React.useState(0);
 
@@ -776,6 +992,7 @@ function AuthenticatedApp({
         bootstrap={bootstrap}
         loading={refreshingDashboard || initializing}
         onRefresh={onRefreshAll}
+        user={session.user}
       />
     ),
     pos: () => (
@@ -803,6 +1020,7 @@ function AuthenticatedApp({
         selectedCategory={selectedCategory}
         setProductSearch={setProductSearch}
         setSelectedCategory={setSelectedCategory}
+        onOpenDocumentMenu={onOpenDocumentMenu}
       />
     ),
     history: () => (
@@ -826,6 +1044,9 @@ function AuthenticatedApp({
 
   return (
     <BottomNavigation
+      activeColor={appTheme.colors.primary}
+      activeIndicatorStyle={{ backgroundColor: appTheme.colors.primaryContainer }}
+      barStyle={styles.bottomBar}
       navigationState={{ index: tabIndex, routes }}
       onIndexChange={setTabIndex}
       renderScene={renderScene}
@@ -838,11 +1059,14 @@ function DashboardScreen({
   bootstrap,
   loading,
   onRefresh,
+  user,
 }: {
   bootstrap: BootstrapPayload;
   loading: boolean;
   onRefresh: () => void;
+  user: User;
 }) {
+  const insets = useSafeAreaInsets();
   const summaryCards = [
     {
       label: 'Produk aktif',
@@ -868,18 +1092,41 @@ function DashboardScreen({
 
   return (
     <ScrollView
-      contentContainerStyle={styles.screenContent}
+      contentContainerStyle={[
+        styles.screenContent,
+        { paddingTop: Math.max(insets.top + 8, 16), paddingBottom: 32 + Math.max(insets.bottom, 8) },
+      ]}
       refreshControl={<RefreshControl refreshing={loading} onRefresh={onRefresh} />}
     >
-      <Text variant="headlineSmall">Ringkasan operasional</Text>
-      <Text style={styles.mutedText} variant="bodyMedium">
-        Snapshot cepat untuk kasir mobile.
-      </Text>
+      <Surface mode="flat" style={styles.heroCard}>
+        <View style={styles.heroHeader}>
+          <View style={{ flex: 1, gap: 4 }}>
+            <Text variant="bodyMedium" style={styles.heroEyebrow}>
+              Dashboard kasir
+            </Text>
+            <Text variant="headlineSmall" style={styles.heroTitle}>
+              Halo, {user.name.split(' ')[0]}
+            </Text>
+            <Text style={styles.heroDescription} variant="bodyMedium">
+              Pantau transaksi berjalan, hold terbaru, dan metode pembayaran dari satu layar.
+            </Text>
+          </View>
+          <Avatar.Icon icon="storefront-outline" size={52} style={styles.heroAvatar} />
+        </View>
+        <View style={styles.heroStatsRow}>
+          <Chip icon="cart-outline" style={styles.heroChip}>
+            {bootstrap.cart.items_count} item aktif
+          </Chip>
+          <Chip icon="archive-arrow-up-outline" style={styles.heroChip}>
+            {bootstrap.held_carts.length} hold
+          </Chip>
+        </View>
+      </Surface>
 
       <View style={styles.summaryGrid}>
         {summaryCards.map((item) => (
           <Card key={item.label} mode="contained" style={styles.summaryCard}>
-            <Card.Content>
+            <Card.Content style={styles.cardContentGap}>
               <List.Icon icon={item.icon} />
               <Text variant="headlineSmall">{item.value}</Text>
               <Text variant="bodyMedium" style={styles.mutedText}>
@@ -961,6 +1208,7 @@ type PosScreenProps = {
   onRefresh: () => void;
   setProductSearch: (value: string) => void;
   setSelectedCategory: (value: number | null) => void;
+  onOpenDocumentMenu: (transaction: TransactionDetail) => void;
 };
 
 function PosScreen({
@@ -987,11 +1235,13 @@ function PosScreen({
   selectedCategory,
   setProductSearch,
   setSelectedCategory,
+  onOpenDocumentMenu,
 }: PosScreenProps) {
+  const insets = useSafeAreaInsets();
   const [view, setView] = React.useState<'products' | 'cart'>('products');
   const [customerPickerVisible, setCustomerPickerVisible] = React.useState(false);
   const [heldVisible, setHeldVisible] = React.useState(false);
-  const [selectedCustomer, setSelectedCustomer] = React.useState<Customer | null>(customers[0] ?? null);
+  const [selectedCustomer, setSelectedCustomer] = React.useState<Customer | null>(null);
   const [customerSearch, setCustomerSearch] = React.useState('');
   const [discount, setDiscount] = React.useState('0');
   const [shippingCost, setShippingCost] = React.useState('0');
@@ -1015,8 +1265,8 @@ function PosScreen({
   });
 
   React.useEffect(() => {
-    if (!selectedCustomer && customers.length > 0) {
-      setSelectedCustomer(customers[0]);
+    if (selectedCustomer && !customers.some((customer) => customer.id === selectedCustomer.id)) {
+      setSelectedCustomer(null);
     }
   }, [customers, selectedCustomer]);
 
@@ -1072,6 +1322,24 @@ function PosScreen({
     setDueDate('');
     setPaymentMethod(defaultGateway && defaultGateway !== 'cash' ? defaultGateway : 'cash');
   }, [defaultGateway]);
+
+  const handleNumericFocus = React.useCallback(
+    (value: string, setter: React.Dispatch<React.SetStateAction<string>>) => {
+      if (value === '0') {
+        setter('');
+      }
+    },
+    []
+  );
+
+  const handleNumericBlur = React.useCallback(
+    (value: string, setter: React.Dispatch<React.SetStateAction<string>>) => {
+      if (!value.trim()) {
+        setter('0');
+      }
+    },
+    []
+  );
 
   const handleCheckout = React.useCallback(async () => {
     if (cart.items.length === 0) {
@@ -1160,14 +1428,39 @@ function PosScreen({
 
   return (
     <View style={styles.flexContainer}>
-      <ScrollView contentContainerStyle={styles.screenContent}>
+      <ScrollView
+        contentContainerStyle={[
+          styles.screenContent,
+          { paddingTop: Math.max(insets.top + 8, 16), paddingBottom: 32 + Math.max(insets.bottom, 8) },
+        ]}
+      >
         <View style={styles.headerRow}>
-          <Text variant="headlineSmall">Kasir mobile</Text>
+          <View style={{ flex: 1 }}>
+            <Text variant="headlineSmall">Kasir mobile</Text>
+            <Text style={styles.mutedText} variant="bodyMedium">
+              Alur cepat untuk scan, hold, dan checkout.
+            </Text>
+          </View>
           <View style={styles.inlineRow}>
             <IconButton icon="archive-arrow-up-outline" onPress={() => setHeldVisible(true)} />
             <IconButton icon="refresh" onPress={onRefresh} />
           </View>
         </View>
+
+        <Surface mode="flat" style={styles.posSummaryBanner}>
+          <View>
+            <Text style={styles.heroEyebrow} variant="bodySmall">
+              Transaksi aktif
+            </Text>
+            <Text variant="headlineSmall">{formatCurrency(grandTotal)}</Text>
+            <Text style={styles.mutedText} variant="bodySmall">
+              {cart.items_count} item di cart
+            </Text>
+          </View>
+          <Button icon="cash-register" mode="contained" onPress={() => setView('cart')}>
+            Buka cart
+          </Button>
+        </Surface>
 
         <SegmentedButtons
           buttons={[
@@ -1295,14 +1588,18 @@ function PosScreen({
                   keyboardType="number-pad"
                   label="Diskon"
                   mode="outlined"
+                  onBlur={() => handleNumericBlur(discount, setDiscount)}
                   onChangeText={setDiscount}
+                  onFocus={() => handleNumericFocus(discount, setDiscount)}
                   value={discount}
                 />
                 <TextInput
                   keyboardType="number-pad"
                   label="Ongkir"
                   mode="outlined"
+                  onBlur={() => handleNumericBlur(shippingCost, setShippingCost)}
                   onChangeText={setShippingCost}
+                  onFocus={() => handleNumericFocus(shippingCost, setShippingCost)}
                   value={shippingCost}
                 />
 
@@ -1338,7 +1635,9 @@ function PosScreen({
                         keyboardType="number-pad"
                         label="Nominal bayar"
                         mode="outlined"
+                        onBlur={() => handleNumericBlur(cash, setCash)}
                         onChangeText={setCash}
+                        onFocus={() => handleNumericFocus(cash, setCash)}
                         value={cash}
                       />
                     )}
@@ -1515,6 +1814,9 @@ function PosScreen({
             )}
           </Dialog.Content>
           <Dialog.Actions>
+            {checkoutResult && (
+              <Button onPress={() => onOpenDocumentMenu(checkoutResult)}>Dokumen</Button>
+            )}
             <Button onPress={() => setCheckoutResult(null)}>Siap</Button>
           </Dialog.Actions>
         </Dialog>
@@ -1536,9 +1838,20 @@ function HistoryScreen({
   onSearchChange: (value: string) => void;
   onTransactionPress: (invoice: string) => void;
 }) {
+  const insets = useSafeAreaInsets();
   return (
-    <ScrollView contentContainerStyle={styles.screenContent}>
-      <Text variant="headlineSmall">Riwayat transaksi</Text>
+    <ScrollView
+      contentContainerStyle={[
+        styles.screenContent,
+        { paddingTop: Math.max(insets.top + 8, 16), paddingBottom: 32 + Math.max(insets.bottom, 8) },
+      ]}
+    >
+      <Surface mode="flat" style={styles.sectionBanner}>
+        <Text variant="headlineSmall">Riwayat transaksi</Text>
+        <Text style={styles.mutedText} variant="bodyMedium">
+          Lihat transaksi terakhir, buka detail, lalu cetak ulang struk bila perlu.
+        </Text>
+      </Surface>
       <Searchbar
         onChangeText={onSearchChange}
         placeholder="Cari invoice"
@@ -1568,10 +1881,10 @@ function HistoryScreen({
                 <Text variant="titleSmall">{formatCurrency(transaction.grand_total)}</Text>
               </View>
               <View style={styles.wrapRow}>
-                <Chip compact icon="credit-card-outline">
-                  {transaction.payment_method}
+                <Chip compact icon="credit-card-outline" style={styles.neutralChip}>
+                  {getPaymentMethodLabel(transaction.payment_method)}
                 </Chip>
-                <Chip compact icon="check-outline">
+                <Chip compact icon={getStatusChipIcon(transaction.payment_status)} style={styles.neutralChip}>
                   {transaction.payment_status}
                 </Chip>
               </View>
@@ -1597,12 +1910,33 @@ function ProfileScreen({
   onApiBaseUrlChange: (value: string) => void;
   onLogout: () => void;
 }) {
+  const insets = useSafeAreaInsets();
   return (
-    <ScrollView contentContainerStyle={styles.screenContent}>
+    <ScrollView
+      contentContainerStyle={[
+        styles.screenContent,
+        { paddingTop: Math.max(insets.top + 8, 16), paddingBottom: 32 + Math.max(insets.bottom, 8) },
+      ]}
+    >
+      <Surface mode="flat" style={styles.heroCard}>
+        <View style={styles.heroHeader}>
+          <View style={{ flex: 1, gap: 4 }}>
+            <Text variant="bodyMedium" style={styles.heroEyebrow}>
+              Akun kasir
+            </Text>
+            <Text variant="headlineSmall" style={styles.heroTitle}>
+              {user.name}
+            </Text>
+            <Text variant="bodyMedium" style={styles.heroDescription}>
+              Kelola endpoint backend dan sesi login dari sini.
+            </Text>
+          </View>
+          <Avatar.Text label={user.name.slice(0, 2).toUpperCase()} size={56} style={styles.heroAvatar} />
+        </View>
+      </Surface>
+
       <Card mode="contained">
         <Card.Content style={styles.cardContentGap}>
-          <Avatar.Text label={user.name.slice(0, 2).toUpperCase()} size={64} />
-          <Text variant="headlineSmall">{user.name}</Text>
           <Text variant="bodyMedium" style={styles.mutedText}>
             {user.email}
           </Text>
@@ -1641,17 +1975,39 @@ const styles = StyleSheet.create({
     alignSelf: 'center',
   },
   authCard: {
-    borderRadius: 20,
-    gap: 12,
+    backgroundColor: '#ffffff',
+    borderRadius: 28,
+    gap: 14,
     padding: 24,
   },
   authContainer: {
+    backgroundColor: '#f4f7f8',
     flexGrow: 1,
     justifyContent: 'center',
     padding: 20,
   },
+  authHero: {
+    backgroundColor: '#0f6b5f',
+    borderRadius: 28,
+    gap: 8,
+    marginBottom: 16,
+    padding: 24,
+  },
+  authHeroText: {
+    color: '#eafff7',
+  },
   bootText: {
     marginTop: 16,
+  },
+  bootstrapErrorBox: {
+    gap: 12,
+    marginTop: 16,
+    maxWidth: 320,
+  },
+  bottomBar: {
+    backgroundColor: '#ffffff',
+    borderTopColor: '#e5eaef',
+    borderTopWidth: 1,
   },
   buttonRow: {
     flexDirection: 'row',
@@ -1681,6 +2037,38 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
   },
+  heroAvatar: {
+    backgroundColor: '#d8f3ec',
+  },
+  heroCard: {
+    backgroundColor: '#0f6b5f',
+    borderRadius: 28,
+    gap: 14,
+    padding: 20,
+  },
+  heroChip: {
+    backgroundColor: 'rgba(255,255,255,0.16)',
+  },
+  heroDescription: {
+    color: '#dff7f1',
+    opacity: 0.92,
+  },
+  heroEyebrow: {
+    color: '#b8ede1',
+  },
+  heroHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 16,
+  },
+  heroStatsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  heroTitle: {
+    color: '#ffffff',
+  },
   heldCard: {
     marginBottom: 12,
   },
@@ -1700,13 +2088,24 @@ const styles = StyleSheet.create({
   },
   modalCard: {
     backgroundColor: '#fff',
-    borderRadius: 16,
+    borderRadius: 24,
     gap: 12,
     margin: 20,
     padding: 20,
   },
   mutedText: {
     opacity: 0.72,
+  },
+  neutralChip: {
+    backgroundColor: '#eef2f6',
+  },
+  posSummaryBanner: {
+    alignItems: 'center',
+    backgroundColor: '#ffffff',
+    borderRadius: 24,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    padding: 18,
   },
   productGrid: {
     gap: 12,
@@ -1719,6 +2118,12 @@ const styles = StyleSheet.create({
     gap: 16,
     padding: 16,
     paddingBottom: 32,
+  },
+  sectionBanner: {
+    backgroundColor: '#ffffff',
+    borderRadius: 24,
+    gap: 6,
+    padding: 18,
   },
   sectionSpacing: {
     marginTop: 12,

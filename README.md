@@ -11,6 +11,7 @@ App React Native (Expo) untuk backend Laravel POS ini.
 - Hold / resume transaksi
 - Checkout tunai, transfer bank, gateway, dan pay later
 - Riwayat transaksi + detail transaksi
+- Preview, print, dan share receipt PDF setelah checkout
 - Quick add customer
 
 ## Menjalankan
