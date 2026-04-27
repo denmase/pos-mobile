@@ -30,6 +30,14 @@ export type Product = {
   };
 };
 
+export type PaginatedProductResponse = {
+  data: Product[];
+  current_page: number;
+  last_page: number;
+  per_page: number;
+  total: number;
+};
+
 export type Customer = {
   id: number;
   name: string;

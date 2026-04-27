@@ -1,6 +1,5 @@
 import React from 'react';
 import {
-  FlatList,
   Linking,
   RefreshControl,
   ScrollView,
@@ -53,6 +52,7 @@ import type {
   Customer,
   HeldCart,
   LoginResponse,
+  PaginatedProductResponse,
   PaymentGateway,
   Product,
   TransactionDocumentPayload,
@@ -64,7 +64,7 @@ import type {
 import { formatCurrency, formatDateTime } from './src/utils/format';
 import { CartItemRow } from './src/components/cart-item-row';
 import { EmptyState } from './src/components/empty-state';
-import { ProductCard } from './src/components/product-card';
+import { ProductCatalogPanel } from './src/components/product-catalog-panel';
 import { printHtmlDocument, shareHtmlDocumentPdf } from './src/lib/receipt';
 
 const DEFAULT_API_BASE_URL = normalizeBaseUrl(
@@ -122,6 +122,9 @@ export default function App() {
   const [productsLoading, setProductsLoading] = React.useState(false);
   const [productSearch, setProductSearch] = React.useState('');
   const [selectedCategory, setSelectedCategory] = React.useState<number | null>(null);
+  const [productPage, setProductPage] = React.useState(1);
+  const [productLastPage, setProductLastPage] = React.useState(1);
+  const [productTotal, setProductTotal] = React.useState(0);
   const [transactions, setTransactions] = React.useState<TransactionSummary[]>([]);
   const [historySearch, setHistorySearch] = React.useState('');
   const [historyLoading, setHistoryLoading] = React.useState(false);
@@ -154,18 +157,31 @@ export default function App() {
   );
 
   const loadProducts = React.useCallback(
-    async (activeSession: Session, search = '', categoryId: number | null = null) => {
+    async (
+      activeSession: Session,
+      search = '',
+      categoryId: number | null = null,
+      page = 1
+    ) => {
       setProductsLoading(true);
       try {
-        const payload = await mobileRequest<{ data: Product[] }>(activeSession.baseUrl, '/products', {
-          token: activeSession.token,
-          query: {
-            per_page: 60,
-            search: search || undefined,
-            category_id: categoryId ?? undefined,
-          },
-        });
+        const payload = await mobileRequest<PaginatedProductResponse>(
+          activeSession.baseUrl,
+          '/products',
+          {
+            token: activeSession.token,
+            query: {
+              per_page: 8,
+              page,
+              search: search || undefined,
+              category_id: categoryId ?? undefined,
+            },
+          }
+        );
         setProducts(payload.data);
+        setProductPage(payload.current_page);
+        setProductLastPage(Math.max(payload.last_page, 1));
+        setProductTotal(payload.total);
       } finally {
         setProductsLoading(false);
       }
@@ -256,11 +272,21 @@ export default function App() {
     }
 
     const timeoutId = setTimeout(() => {
-      void loadProducts(session, productSearch, selectedCategory);
+      void loadProducts(session, productSearch, selectedCategory, productPage);
     }, 250);
 
     return () => clearTimeout(timeoutId);
-  }, [loadProducts, productSearch, selectedCategory, session]);
+  }, [loadProducts, productPage, productSearch, selectedCategory, session]);
+
+  const handleProductSearchChange = React.useCallback((value: string) => {
+    setProductSearch(value);
+    setProductPage(1);
+  }, []);
+
+  const handleSelectedCategoryChange = React.useCallback((value: number | null) => {
+    setSelectedCategory(value);
+    setProductPage(1);
+  }, []);
 
   React.useEffect(() => {
     if (!session) {
@@ -353,7 +379,7 @@ export default function App() {
     try {
       await Promise.all([
         loadBootstrap(session),
-        loadProducts(session, productSearch, selectedCategory),
+        loadProducts(session, productSearch, selectedCategory, productPage),
         loadTransactions(session, historySearch),
       ]);
     } catch (error) {
@@ -367,6 +393,7 @@ export default function App() {
     loadProducts,
     loadTransactions,
     notify,
+    productPage,
     productSearch,
     selectedCategory,
     session,
@@ -528,11 +555,15 @@ export default function App() {
             productSearch={productSearch}
             products={products}
             productsLoading={productsLoading}
+            productLastPage={productLastPage}
+            productPage={productPage}
+            productTotal={productTotal}
             selectedCategory={selectedCategory}
             session={session}
             setInitializing={setInitializing}
-            setProductSearch={setProductSearch}
-            setSelectedCategory={setSelectedCategory}
+            setProductPage={setProductPage}
+            setProductSearch={handleProductSearchChange}
+            setSelectedCategory={handleSelectedCategoryChange}
             setTransactions={setTransactions}
             transactions={transactions}
             historyLoading={historyLoading}
@@ -763,6 +794,9 @@ type AuthenticatedAppProps = {
   products: Product[];
   transactions: TransactionSummary[];
   productSearch: string;
+  productPage: number;
+  productLastPage: number;
+  productTotal: number;
   selectedCategory: number | null;
   historySearch: string;
   productsLoading: boolean;
@@ -771,6 +805,7 @@ type AuthenticatedAppProps = {
   initializing: boolean;
   apiBaseUrlDraft: string;
   setProductSearch: (value: string) => void;
+  setProductPage: (value: number) => void;
   setSelectedCategory: (value: number | null) => void;
   setHistorySearch: (value: string) => void;
   setTransactions: (value: TransactionSummary[]) => void;
@@ -796,6 +831,9 @@ function AuthenticatedApp({
   onShowMessage,
   onTransactionPress,
   productSearch,
+  productLastPage,
+  productPage,
+  productTotal,
   products,
   productsLoading,
   refreshingDashboard,
@@ -804,6 +842,7 @@ function AuthenticatedApp({
   setApiBaseUrlDraft,
   setHistorySearch,
   setInitializing,
+  setProductPage,
   setProductSearch,
   setSelectedCategory,
   transactions,
@@ -1015,9 +1054,13 @@ function AuthenticatedApp({
         onUpdateCartQty={updateCartQty}
         paymentGateways={bootstrap.payment_gateways}
         productSearch={productSearch}
+        productLastPage={productLastPage}
+        productPage={productPage}
+        productTotal={productTotal}
         products={products}
         productsLoading={productsLoading || initializing}
         selectedCategory={selectedCategory}
+        setProductPage={setProductPage}
         setProductSearch={setProductSearch}
         setSelectedCategory={setSelectedCategory}
         onOpenDocumentMenu={onOpenDocumentMenu}
@@ -1188,6 +1231,9 @@ type PosScreenProps = {
   categories: BootstrapPayload['categories'];
   customers: Customer[];
   products: Product[];
+  productPage: number;
+  productLastPage: number;
+  productTotal: number;
   cart: CartPayload;
   heldCarts: HeldCart[];
   paymentGateways: PaymentGateway[];
@@ -1206,6 +1252,7 @@ type PosScreenProps = {
   onSubmitCheckout: (payload: Record<string, unknown>) => Promise<TransactionDetail>;
   onShowMessage: (message: string) => void;
   onRefresh: () => void;
+  setProductPage: (value: number) => void;
   setProductSearch: (value: string) => void;
   setSelectedCategory: (value: number | null) => void;
   onOpenDocumentMenu: (transaction: TransactionDetail) => void;
@@ -1230,9 +1277,13 @@ function PosScreen({
   onUpdateCartQty,
   paymentGateways,
   productSearch,
+  productLastPage,
+  productPage,
+  productTotal,
   products,
   productsLoading,
   selectedCategory,
+  setProductPage,
   setProductSearch,
   setSelectedCategory,
   onOpenDocumentMenu,
@@ -1472,58 +1523,20 @@ function PosScreen({
         />
 
         {view === 'products' ? (
-          <>
-            <Searchbar
-              onChangeText={setProductSearch}
-              placeholder="Cari nama, barcode, atau SKU"
-              value={productSearch}
-            />
-            <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-              <View style={styles.horizontalChips}>
-                <Chip
-                  icon={selectedCategory === null ? 'check' : undefined}
-                  onPress={() => setSelectedCategory(null)}
-                  selected={selectedCategory === null}
-                >
-                  Semua
-                </Chip>
-                {categories.map((category) => (
-                  <Chip
-                    icon={selectedCategory === category.id ? 'check' : undefined}
-                    key={category.id}
-                    onPress={() => setSelectedCategory(category.id)}
-                    selected={selectedCategory === category.id}
-                  >
-                    {category.name}
-                  </Chip>
-                ))}
-              </View>
-            </ScrollView>
-
-            {productsLoading ? (
-              <View style={styles.loadingBlock}>
-                <ActivityIndicator animating />
-              </View>
-            ) : products.length === 0 ? (
-              <EmptyState
-                description="Coba ubah kata kunci atau kategori."
-                icon="package-variant-closed-remove"
-                title="Produk tidak ditemukan"
-              />
-            ) : (
-              <FlatList
-                columnWrapperStyle={styles.productGrid}
-                contentContainerStyle={styles.productList}
-                data={products}
-                keyExtractor={(item) => String(item.id)}
-                numColumns={2}
-                renderItem={({ item }) => (
-                  <ProductCard onAdd={onAddProduct} product={item} />
-                )}
-                scrollEnabled={false}
-              />
-            )}
-          </>
+          <ProductCatalogPanel
+            categories={categories}
+            onAddProduct={onAddProduct}
+            onProductPageChange={setProductPage}
+            onProductSearchChange={setProductSearch}
+            onSelectedCategoryChange={setSelectedCategory}
+            productLastPage={productLastPage}
+            productPage={productPage}
+            productSearch={productSearch}
+            productTotal={productTotal}
+            products={products}
+            productsLoading={productsLoading}
+            selectedCategory={selectedCategory}
+          />
         ) : (
           <>
             <Card mode="contained">
@@ -2098,6 +2111,23 @@ const styles = StyleSheet.create({
   },
   neutralChip: {
     backgroundColor: '#eef2f6',
+  },
+  paginationButtonContent: {
+    flexDirection: 'row-reverse',
+  },
+  paginationControls: {
+    flexDirection: 'row',
+    gap: 12,
+    justifyContent: 'space-between',
+  },
+  paginationSummary: {
+    alignItems: 'center',
+    backgroundColor: '#ffffff',
+    borderRadius: 18,
+    flexDirection: 'row',
+    gap: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
   },
   posSummaryBanner: {
     alignItems: 'center',
